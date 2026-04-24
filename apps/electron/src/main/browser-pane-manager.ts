@@ -423,6 +423,11 @@ export class BrowserPaneManager implements IBrowserPaneManager {
     const overlayWcWithBg = nativeOverlayView.webContents as typeof nativeOverlayView.webContents & { setBackgroundColor?: (color: string) => void }
     overlayWcWithBg.setBackgroundColor?.('#00000000')
 
+    // Load about:blank into the overlay so it has a proper URL. Without this,
+    // the overlay appears as an empty-URL CDP target which causes Playwright's
+    // connectOverCDP to hang (it waits for all targets to reach a ready state).
+    void nativeOverlayView.webContents.loadURL('about:blank')
+
     const cdp = new BrowserCDP(pageView.webContents)
 
     const instance: BrowserInstance = {
