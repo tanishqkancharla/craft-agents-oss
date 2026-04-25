@@ -21,6 +21,13 @@ export interface BrowserInstanceSnapshot {
   isVisible: boolean
   title: string
   currentUrl: string
+  librettoSession?: string | null
+  pageTargetId?: string | null
+}
+
+export interface BrowserLibrettoAttachment {
+  librettoSession: string
+  pageTargetId: string | null
 }
 
 export interface BrowserScreenshotOptions {
@@ -189,6 +196,18 @@ export interface IBrowserPaneManager {
 
   /** Clear agent control overlay for a specific instance */
   clearAgentControlForInstance(instanceId: string, sessionId?: string): { released: boolean; reason?: string }
+
+  /** Resolve the CDP target ID for the instance's page view */
+  getPageViewTargetId(id: string): Promise<string | null>
+
+  /** Persist Libretto attachment metadata on the instance */
+  setLibrettoAttachment(id: string, attachment: BrowserLibrettoAttachment): void
+
+  /** Read Libretto attachment metadata for the instance */
+  getLibrettoAttachment(id: string): BrowserLibrettoAttachment | null
+
+  /** Clear Libretto attachment metadata for the instance */
+  clearLibrettoAttachment(id: string): void
 
   // -- Navigation ----------------------------------------------------------
 

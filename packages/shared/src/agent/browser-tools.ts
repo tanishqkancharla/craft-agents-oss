@@ -13,6 +13,7 @@
 import { tool } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import { executeBrowserToolCommand } from './browser-tool-runtime.ts';
+import { FEATURE_FLAGS } from '../feature-flags.ts';
 
 // Tool result type - matches MCP CallToolResult content blocks
 type ToolResult = {
@@ -36,7 +37,8 @@ function successResponse(text: string): ToolResult {
   };
 }
 
-const BROWSER_RELEASE_HINT = '\n\nWhen you are done using the browser, call browser_tool with command "close" to close the window entirely, or "release" to dismiss the overlay and let the user continue browsing.';
+const LEGACY_BROWSER_RELEASE_HINT = '\n\nWhen you are done using the browser, call browser_tool with command "close" to close the window entirely, or "release" to dismiss the overlay and let the user continue browsing.';
+const LIBRETTO_BROWSER_RELEASE_HINT = '\n\nWhen you are done using the browser, call browser_tool with command "close" to close the window entirely, or "release" to dismiss the overlay and let the user continue browsing.';
 
 // ============================================================================
 // Browser Pane Function Interface
@@ -120,8 +122,22 @@ export interface BrowserLifecycleActionResult {
   reason?: string
 }
 
+export interface BrowserOpenPanelResult {
+  instanceId: string
+  url?: string
+  title?: string
+  librettoSession?: string
+  pageTargetId?: string
+}
+
+export interface BrowserLibrettoResult {
+  stdout: string
+  stderr: string
+  exitCode: number
+}
+
 export interface BrowserPaneFns {
-  openPanel: (options?: { background?: boolean }) => Promise<{ instanceId: string }>;
+  openPanel: (options?: { background?: boolean; url?: string }) => Promise<BrowserOpenPanelResult>;
   navigate: (url: string) => Promise<{ url: string; title: string }>;
   snapshot: () => Promise<{ url: string; title: string; nodes: Array<{ ref: string; role: string; name: string; value?: string; description?: string; focused?: boolean; checked?: boolean; disabled?: boolean }> }>;
   click: (ref: string, options?: { waitFor?: 'none' | 'navigation' | 'network-idle'; timeoutMs?: number }) => Promise<void>;
@@ -149,6 +165,7 @@ export interface BrowserPaneFns {
   releaseControl: (instanceId?: string) => Promise<BrowserLifecycleActionResult>;
   closeWindow: (instanceId?: string) => Promise<BrowserLifecycleActionResult>;
   hideWindow: (instanceId?: string) => Promise<BrowserLifecycleActionResult>;
+  runLibretto?: (args: string[]) => Promise<BrowserLibrettoResult>;
   listWindows: () => Promise<Array<{
     id: string;
     title: string;
@@ -158,6 +175,7 @@ export interface BrowserPaneFns {
     ownerSessionId: string | null;
     boundSessionId: string | null;
     agentControlActive?: boolean;
+    librettoSession?: string | null;
   }>>;
   detectChallenge: () => Promise<{ detected: boolean; provider: string; signals: string[] }>;
 }
@@ -179,7 +197,7 @@ export interface BrowserToolsOptions {
 // Tool Descriptions
 // ============================================================================
 
-const BROWSER_TOOL_DESCRIPTION = `Run browser actions using a CLI-like command (string or array input).
+const LEGACY_BROWSER_TOOL_DESCRIPTION = `Run browser actions using a CLI-like command (string or array input).
 
 All browser interactions use this single tool with strict validation and actionable feedback.
 String mode supports batching with semicolons: \`fill @e1 value; fill @e2 value; click @e3\`
@@ -226,6 +244,44 @@ Examples:
 - \`close [windowId]\` — close and destroy the browser window
 - \`hide [windowId]\` — hide the window while preserving state`;
 
+const LIBRETTO_BROWSER_TOOL_DESCRIPTION = `Run browser actions in Craft's built-in browser using the browser_tool command surface.
+
+Supported commands:
+- \`open [url] [--foreground|-f]\`
+- \`windows\`
+- \`focus [windowId]\`
+- \`hide [windowId]\`
+- \`release [windowId|all]\`
+- \`close [windowId]\`
+- \`snapshot ...\`
+- \`exec ...\`
+- \`run ...\`
+- \`resume ...\`
+
+Run \`open\` first. It eagerly creates the browser automation session for the pane.
+If automation later becomes detached or stale, use \`close\` and then \`open\` to recreate it.
+
+String input is tokenized like a shell command. Array input preserves arguments exactly.
+
+Examples:
+- \`open https://example.com\`
+- \`snapshot --objective \"Find the primary CTA\"\`
+- \`exec \"return await page.title()\"\`
+- \`resume\`
+- \`windows\``;
+
+function getBrowserToolDescription(): string {
+  return FEATURE_FLAGS.librettoBrowserTool
+    ? LIBRETTO_BROWSER_TOOL_DESCRIPTION
+    : LEGACY_BROWSER_TOOL_DESCRIPTION;
+}
+
+function getBrowserReleaseHint(): string {
+  return FEATURE_FLAGS.librettoBrowserTool
+    ? LIBRETTO_BROWSER_RELEASE_HINT
+    : LEGACY_BROWSER_RELEASE_HINT;
+}
+
 // ============================================================================
 // Tool Factories
 // ============================================================================
@@ -243,7 +299,7 @@ export function createBrowserTools(options: BrowserToolsOptions) {
     // Single CLI-like tool for all browser actions
     tool(
       'browser_tool',
-      BROWSER_TOOL_DESCRIPTION,
+      getBrowserToolDescription(),
       {
         command: z.union([
           z.string(),
@@ -259,7 +315,7 @@ export function createBrowserTools(options: BrowserToolsOptions) {
           });
 
           const text = result.appendReleaseHint
-            ? result.output + BROWSER_RELEASE_HINT
+            ? result.output + getBrowserReleaseHint()
             : result.output;
 
           if (result.image) {

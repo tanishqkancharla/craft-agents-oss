@@ -19,6 +19,7 @@ import {
   type PostInitResult,
 } from '@craft-agent/shared/agent/backend'
 import { getLlmConnection, getLlmConnections, getDefaultLlmConnection, getDefaultThinkingLevel, resetManagedAnthropicAuthEnvVars } from '@craft-agent/shared/config'
+import { FEATURE_FLAGS } from '@craft-agent/shared/feature-flags'
 import { PrivilegedExecutionBroker } from '@craft-agent/server-core/services'
 import { isValidWorkingDirectory } from '../utils/path-validation'
 import { InitGate } from '@craft-agent/server-core/domain'
@@ -94,6 +95,7 @@ import { extractLabelId, resolveSessionLabels } from '@craft-agent/shared/labels
 import { ensureLabelsExist } from '@craft-agent/shared/labels/crud'
 import { loadStatusConfig } from '@craft-agent/shared/statuses/storage'
 import { AutomationSystem, createPromptHistoryEntry, appendAutomationHistoryEntry, type AutomationSystemMetadataSnapshot } from '@craft-agent/shared/automations'
+import { LibrettoSDK, type LibrettoBrowserCommandName } from './libretto-sdk'
 
 // Import from server-core domain utilities
 import { sanitizeForTitle, shouldActivateBrowserOverlay, normalizeBrowserToolName, rollbackFailedBranchCreation, releaseBrowserOwnershipOnForcedStop } from '@craft-agent/server-core/domain'
@@ -991,6 +993,7 @@ interface PendingDelta {
 
 export class SessionManager implements ISessionManager {
   private sessions: Map<string, ManagedSession> = new Map()
+  private librettoSdk = new LibrettoSDK()
   // Delta batching for performance - reduces IPC events from 50+/sec to ~20/sec
   private pendingDeltas: Map<string, PendingDelta> = new Map()
   private deltaFlushTimers: Map<string, NodeJS.Timeout> = new Map()
@@ -2874,6 +2877,19 @@ export class SessionManager implements ISessionManager {
           return instanceId
         }
 
+        const resolveExistingSessionBrowserInstance = (commandName: string): string => {
+          const windows = bpm.listInstances()
+          const target = windows.find((w) => w.boundSessionId === sid)
+            ?? windows.find((w) => w.ownerSessionId === sid)
+
+          if (!target) {
+            throw new Error(`No browser window is currently associated with this session. Use "open" first.`)
+          }
+
+          sessionLog.info(`[browser-pane] existing target resolved: ${commandName} session=${sid} instance=${target.id}`)
+          return target.id
+        }
+
         const resolveLifecycleWindowTarget = (command: 'release' | 'close' | 'hide', requestedInstanceId?: string) => {
           const windows = bpm.listInstances()
 
@@ -2920,15 +2936,91 @@ export class SessionManager implements ISessionManager {
           return { windows, target: validated.target }
         }
 
+        const getLibrettoCdpEndpoint = (): string => {
+          const cdpPort = process.env.CRAFT_CDP_PORT?.trim()
+          if (!cdpPort) {
+            throw new Error('Built-in browser automation requires CRAFT_CDP_PORT to be set so Electron exposes a browser CDP endpoint.')
+          }
+          return `http://127.0.0.1:${cdpPort}`
+        }
+
+        const attachLibrettoToInstance = async (instanceId: string) => {
+          const existing = bpm.getLibrettoAttachment(instanceId)
+          if (existing?.librettoSession && existing.pageTargetId) {
+            return existing
+          }
+
+          const librettoSession = existing?.librettoSession ?? `craft-${instanceId}`
+          const pageTargetId = await bpm.getPageViewTargetId(instanceId)
+
+          if (!existing?.librettoSession) {
+            const connectResult = await this.librettoSdk.attachToBrowser({
+              cwd: managed.workspace.rootPath,
+              cdpUrl: getLibrettoCdpEndpoint(),
+              sessionName: librettoSession,
+            })
+
+            if (connectResult.exitCode !== 0) {
+              const details = [connectResult.stderr.trim(), connectResult.stdout.trim()].filter(Boolean).join('\n\n')
+              throw new Error(details || 'Failed to attach browser automation to the Craft browser pane.')
+            }
+          }
+
+          const attachment = { librettoSession, pageTargetId }
+          bpm.setLibrettoAttachment(instanceId, attachment)
+          return attachment
+        }
+
+        const requireLibrettoAttachment = (instanceId: string) => {
+          const attachment = bpm.getLibrettoAttachment(instanceId)
+          if (!attachment?.librettoSession) {
+            throw new Error(
+              'Browser automation is not attached to this window. Run "browser_tool close" and then "browser_tool open" to recreate the automation session.'
+            )
+          }
+          return attachment
+        }
+
+        const runLibrettoForSession = async (rawArgs: string[]) => {
+          if (rawArgs.length === 0) {
+            throw new Error('Missing browser command.')
+          }
+
+          const instanceId = resolveExistingSessionBrowserInstance('browser_tool_libretto')
+          const attachment = requireLibrettoAttachment(instanceId)
+          const [commandName, ...rest] = rawArgs as [LibrettoBrowserCommandName, ...string[]]
+          return await this.librettoSdk.runBrowserCommand(commandName, rest, {
+            cwd: managed.workspace.rootPath,
+            sessionName: attachment.librettoSession,
+            pageTargetId: attachment.pageTargetId,
+          })
+        }
+
         mergeSessionScopedToolCallbacks(sid, {
           browserPaneFns: {
             openPanel: async (options) => {
               const instanceId = options?.background
                 ? bpm.createForSession(sid, { show: false })
                 : bpm.focusBoundForSession(sid)
+
+              let attachment: { librettoSession: string; pageTargetId: string | null } | null = null
+              if (FEATURE_FLAGS.librettoBrowserTool) {
+                attachment = await attachLibrettoToInstance(instanceId)
+              }
+
+              if (options?.url) {
+                await bpm.navigate(instanceId, options.url)
+              }
+
               const info = bpm.getInstance(instanceId)
               sessionLog.info(`[browser-pane] route decision: browser_open session=${sid} instance=${instanceId} background=${options?.background ?? false} ownerType=${info?.ownerType ?? 'unknown'} ownerSessionId=${info?.ownerSessionId ?? 'none'} visible=${info?.isVisible ?? false}`)
-              return { instanceId }
+              return {
+                instanceId,
+                url: info?.currentUrl,
+                title: info?.title,
+                librettoSession: attachment?.librettoSession,
+                pageTargetId: attachment?.pageTargetId ?? undefined,
+              }
             },
             navigate: (url) => {
               const instanceId = resolveSessionBrowserInstance('browser_navigate')
@@ -3044,6 +3136,10 @@ export class SessionManager implements ISessionManager {
                 throw new Error(`Browser window "${target.id}" is locked to session ${target.boundSessionId}.`)
               }
 
+              if (!target.boundSessionId && target.ownerSessionId && target.ownerSessionId !== sid) {
+                throw new Error(`Browser window "${target.id}" is currently owned by session ${target.ownerSessionId}.`)
+              }
+
               if (!target.boundSessionId) {
                 bpm.bindSession(target.id, sid)
               }
@@ -3110,6 +3206,18 @@ export class SessionManager implements ISessionManager {
                 }
               }
 
+              const attachment = bpm.getLibrettoAttachment(resolution.target.id)
+              if (attachment?.librettoSession) {
+                const closeResult = await this.librettoSdk.closeSession({
+                  cwd: managed.workspace.rootPath,
+                  sessionName: attachment.librettoSession,
+                })
+                if (closeResult.exitCode !== 0) {
+                  sessionLog.warn(`[browser-pane] libretto close failed session=${sid} instance=${resolution.target.id}: ${closeResult.stderr || closeResult.stdout}`)
+                }
+                bpm.clearLibrettoAttachment(resolution.target.id)
+              }
+
               bpm.destroyInstance(resolution.target.id)
               sessionLog.info(`[browser-pane] lifecycle close session=${sid} requested=${requestedInstanceId ?? 'auto'} resolved=${resolution.target.id} result=closed`)
 
@@ -3141,6 +3249,9 @@ export class SessionManager implements ISessionManager {
                 resolvedInstanceId: resolution.target.id,
                 affectedIds: [resolution.target.id],
               }
+            },
+            runLibretto: async (args) => {
+              return await runLibrettoForSession(args)
             },
             listWindows: async () => {
               return bpm.listInstances()
@@ -4732,6 +4843,21 @@ export class SessionManager implements ISessionManager {
 
     // Destroy browser instances bound to this session
     if (this.browserPaneManager) {
+      for (const instance of this.browserPaneManager.listInstances()) {
+        if (instance.boundSessionId !== sessionId) continue
+        const attachment = this.browserPaneManager.getLibrettoAttachment(instance.id)
+        if (!attachment?.librettoSession) continue
+
+        const closeResult = await this.librettoSdk.closeSession({
+          cwd: managed.workspace.rootPath,
+          sessionName: attachment.librettoSession,
+        })
+        if (closeResult.exitCode !== 0) {
+          sessionLog.warn(`[browser-pane] libretto close failed during session delete session=${sessionId} instance=${instance.id}: ${closeResult.stderr || closeResult.stdout}`)
+        }
+        this.browserPaneManager.clearLibrettoAttachment(instance.id)
+      }
+
       this.browserPaneManager.destroyForSession(sessionId)
     }
 

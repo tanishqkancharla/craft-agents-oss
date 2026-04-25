@@ -10,6 +10,7 @@
 import type {
   IBrowserPaneManager,
   AccessibilitySnapshot,
+  BrowserLibrettoAttachment,
   BrowserConsoleEntry,
   BrowserConsoleOptions,
   BrowserDownloadEntry,
@@ -54,6 +55,10 @@ export class NullBrowserPaneManager implements IBrowserPaneManager {
   clearAgentControlForInstance(_instanceId: string, _sessionId?: string): { released: boolean; reason?: string } {
     return { released: false, reason: NOT_AVAILABLE }
   }
+  async getPageViewTargetId(_id: string): Promise<string | null> { return unavailable('getPageViewTargetId') }
+  setLibrettoAttachment(_id: string, _attachment: BrowserLibrettoAttachment): void { unavailable('setLibrettoAttachment') }
+  getLibrettoAttachment(_id: string): BrowserLibrettoAttachment | null { return null }
+  clearLibrettoAttachment(_id: string): void {}
 
   // -- Navigation --
   async navigate(_id: string, _url: string): Promise<{ url: string; title: string }> { unavailable('navigate') }

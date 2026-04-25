@@ -165,6 +165,8 @@ interface BrowserInstance {
   networkLogs: BrowserNetworkEntry[]
   downloads: BrowserDownloadEntry[]
   lastLaunchToken: string | null
+  librettoSession: string | null
+  pageTargetId: string | null
 }
 
 interface CreateBrowserInstanceOptions {
@@ -469,6 +471,8 @@ export class BrowserPaneManager implements IBrowserPaneManager {
       networkLogs: [],
       downloads: [],
       lastLaunchToken: null,
+      librettoSession: null,
+      pageTargetId: null,
     }
 
     const defaultUa = pageView.webContents.userAgent || ''
@@ -1666,6 +1670,43 @@ export class BrowserPaneManager implements IBrowserPaneManager {
     }
   }
 
+  async getPageViewTargetId(id: string): Promise<string | null> {
+    const instance = this.requireAliveInstance(id)
+    if (instance.pageTargetId) return instance.pageTargetId
+
+    const targetInfo = await instance.cdp.getTargetInfo()
+    if (targetInfo.type !== 'page') {
+      mainLog.warn(`[browser-pane] Unexpected CDP target type for ${id}: ${targetInfo.type} url=${targetInfo.url} title=${targetInfo.title}`)
+    }
+
+    instance.pageTargetId = targetInfo.targetId
+    return instance.pageTargetId
+  }
+
+  setLibrettoAttachment(id: string, attachment: { librettoSession: string; pageTargetId: string | null }): void {
+    const instance = this.requireAliveInstance(id)
+    instance.librettoSession = attachment.librettoSession
+    instance.pageTargetId = attachment.pageTargetId
+    this.emitStateChange(instance)
+  }
+
+  getLibrettoAttachment(id: string): { librettoSession: string; pageTargetId: string | null } | null {
+    const instance = this.instances.get(id)
+    if (!instance || instance.window.isDestroyed() || !instance.librettoSession) return null
+    return {
+      librettoSession: instance.librettoSession,
+      pageTargetId: instance.pageTargetId,
+    }
+  }
+
+  clearLibrettoAttachment(id: string): void {
+    const instance = this.instances.get(id)
+    if (!instance) return
+    instance.librettoSession = null
+    instance.pageTargetId = null
+    this.emitStateChange(instance)
+  }
+
   unbindSession(id: string): void {
     const instance = this.instances.get(id)
     if (instance) {
@@ -1680,6 +1721,11 @@ export class BrowserPaneManager implements IBrowserPaneManager {
   unbindAllForSession(sessionId: string): void {
     for (const instance of this.instances.values()) {
       if (instance.boundSessionId === sessionId) {
+        if (instance.librettoSession) {
+          mainLog.info(`[browser-pane] Preserved binding for attached instance ${instance.id} session=${sessionId} librettoSession=${instance.librettoSession}`)
+          continue
+        }
+
         instance.boundSessionId = null
         instance.ownerType = 'manual'
         // Keep ownerSessionId for post-turn lifecycle commands like `close` and `hide`.
@@ -1704,7 +1750,7 @@ export class BrowserPaneManager implements IBrowserPaneManager {
   }
 
   private findReusableUnboundInstance(): BrowserInstance | null {
-    const unbound = Array.from(this.instances.values()).filter(i => i.boundSessionId === null && i.ownerType === 'manual')
+    const unbound = Array.from(this.instances.values()).filter(i => i.boundSessionId === null && i.ownerType === 'manual' && !i.librettoSession)
     if (unbound.length === 0) return null
 
     // Prefer visible windows first, then fall back to first available.
@@ -3117,6 +3163,7 @@ export class BrowserPaneManager implements IBrowserPaneManager {
       isVisible: instance.isVisible,
       agentControlActive: !!instance.agentControl?.active,
       themeColor: instance.themeColor,
+      librettoSession: instance.librettoSession,
     }
   }
 
