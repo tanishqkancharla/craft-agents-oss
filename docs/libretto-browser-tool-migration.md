@@ -38,7 +38,7 @@ Minimal metadata on each `BrowserInstance`:
 librettoSession?: string   // e.g. "craft-abc123"
 ```
 
-Presence implies pinned. Each pane has exactly one `pageView`, so we assume single page — no page-targeting needed.
+Presence implies pinned. Current implementation also stores `pageTargetId` so Libretto can reliably target the pane's `pageView` when multiple BrowserViews are exposed over CDP.
 
 ### Simplify `BrowserPaneFns`
 
@@ -167,11 +167,22 @@ Originally built a per-pane CDP proxy (~300 lines) because Playwright's `connect
 
 ### Phase 3 — Cleanup
 
-- Delete old AX-ref command branches
-- Remove unused `BrowserPaneFns` action methods
-- Remove unused `IBrowserPaneManager` methods
-- Remove or gate `BrowserCDP` tool-facing usage
-- Remove challenge detection if no longer needed
+- Validate lifecycle behavior end-to-end:
+  - `open` eagerly attaches Libretto
+  - later Libretto commands require an existing attachment and tell the user to `close` + `open` if stale
+  - `close` and session deletion clean up Libretto sessions
+  - attached panes stay pinned and are not reused as generic unbound panes
+- Prevent non-`open` Libretto commands from implicitly creating an unattached hidden pane during overlay activation
+- Close Libretto sessions on all destroy paths, including direct pane destruction outside `browser_tool close`
+- Update tests, help text, and docs to match the Libretto command surface
+- Leave the legacy AX-ref path in place behind the feature flag until rollback is no longer needed; remove it in a later follow-up
+
+### Phase 3 — Validated behavior / notes
+
+- Hidden or released panes with a Libretto attachment remain reserved to the owning session until `close` or session deletion.
+- `browser_tool open` is the only command that creates or re-attaches a pane for Libretto automation.
+- `snapshot` / `exec` / `run` / `resume` require an existing attachment; they do not lazily create one.
+- Explicit `browser_tool close` and session deletion perform best-effort `libretto close` cleanup before destroying the pane.
 
 ---
 
@@ -192,12 +203,12 @@ Originally built a per-pane CDP proxy (~300 lines) because Playwright's `connect
 
 ### Phase 3 (cleanup)
 
-- `packages/shared/src/agent/browser-tool-runtime.ts` — delete old branches
-- `packages/shared/src/agent/browser-tools.ts` — delete old types
-- `packages/server-core/src/handlers/browser-pane-manager-interface.ts` — remove old methods
-- `apps/electron/src/main/browser-pane-manager.ts` — remove old action implementations
-- `apps/electron/src/main/browser-cdp.ts` — remove if fully unused
-- `apps/electron/src/main/handlers/browser.ts` — reduce if action RPCs are dead
+- `packages/shared/src/agent/browser-tool-runtime.ts` — tighten Libretto help/error messaging; keep legacy branches behind the flag for now
+- `packages/shared/src/agent/browser-tools.ts` — reduce small redundant Libretto surface while keeping rollback intact
+- `packages/server-core/src/handlers/browser-pane-manager-interface.ts` — add destroy notifications for Libretto cleanup
+- `packages/server-core/src/sessions/SessionManager.ts` — validate close/delete/destroy cleanup and prevent hidden-pane creation for non-\`open\` Libretto commands
+- `apps/electron/src/main/browser-pane-manager.ts` — keep attached panes pinned and notify SessionManager when attached panes are destroyed directly
+- `apps/electron/src/main/__tests__/browser-pane-manager.test.ts` / `packages/shared/src/agent/__tests__/browser-tools-libretto.test.ts` — add Libretto validation coverage
 
 ---
 

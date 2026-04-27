@@ -1054,6 +1054,7 @@ export class SessionManager implements ISessionManager {
   }
 
   private browserPaneManager: IBrowserPaneManager | null = null
+  private librettoBindings = new Map<string, { sessionId: string; workspaceRootPath: string; sessionName: string }>()
   private eventSink: EventSink | null = null
 
   setEventSink(sink: EventSink): void {
@@ -1063,6 +1064,44 @@ export class SessionManager implements ISessionManager {
   setBrowserPaneManager(bpm: IBrowserPaneManager): void {
     this.browserPaneManager = bpm
     bpm.setSessionPathResolver((sessionId) => this.getSessionPath(sessionId))
+    bpm.onInstanceDestroyed((instanceId) => {
+      const binding = this.librettoBindings.get(instanceId)
+      if (!binding) return
+      this.librettoBindings.delete(instanceId)
+
+      void this.closeLibrettoSession({
+        workspaceRootPath: binding.workspaceRootPath,
+        sessionId: binding.sessionId,
+        instanceId,
+        sessionName: binding.sessionName,
+        context: 'instance destroy',
+      })
+    })
+  }
+
+  private async closeLibrettoSession(args: {
+    workspaceRootPath: string
+    sessionId: string
+    instanceId: string
+    sessionName: string
+    context: string
+  }): Promise<void> {
+    try {
+      const closeResult = await this.librettoSdk.closeSession({
+        cwd: args.workspaceRootPath,
+        sessionName: args.sessionName,
+      })
+
+      if (closeResult.exitCode !== 0) {
+        sessionLog.warn(
+          `[browser-pane] libretto close failed during ${args.context} session=${args.sessionId} instance=${args.instanceId}: ${closeResult.stderr || closeResult.stdout}`
+        )
+      }
+    } catch (error) {
+      sessionLog.warn(
+        `[browser-pane] libretto close threw during ${args.context} session=${args.sessionId} instance=${args.instanceId}: ${error instanceof Error ? error.message : String(error)}`
+      )
+    }
   }
 
   /** Returns a strictly increasing timestamp (ms). When Date.now() collides with
@@ -2968,6 +3007,7 @@ export class SessionManager implements ISessionManager {
 
           const attachment = { librettoSession, pageTargetId }
           bpm.setLibrettoAttachment(instanceId, attachment)
+          this.librettoBindings.set(instanceId, { sessionId: sid, workspaceRootPath: managed.workspace.rootPath, sessionName: librettoSession })
           return attachment
         }
 
@@ -3019,7 +3059,6 @@ export class SessionManager implements ISessionManager {
                 url: info?.currentUrl,
                 title: info?.title,
                 librettoSession: attachment?.librettoSession,
-                pageTargetId: attachment?.pageTargetId ?? undefined,
               }
             },
             navigate: (url) => {
@@ -3206,16 +3245,17 @@ export class SessionManager implements ISessionManager {
                 }
               }
 
-              const attachment = bpm.getLibrettoAttachment(resolution.target.id)
-              if (attachment?.librettoSession) {
-                const closeResult = await this.librettoSdk.closeSession({
-                  cwd: managed.workspace.rootPath,
-                  sessionName: attachment.librettoSession,
-                })
-                if (closeResult.exitCode !== 0) {
-                  sessionLog.warn(`[browser-pane] libretto close failed session=${sid} instance=${resolution.target.id}: ${closeResult.stderr || closeResult.stdout}`)
-                }
+              const binding = this.librettoBindings.get(resolution.target.id)
+              if (binding) {
+                this.librettoBindings.delete(resolution.target.id)
                 bpm.clearLibrettoAttachment(resolution.target.id)
+                await this.closeLibrettoSession({
+                  workspaceRootPath: binding.workspaceRootPath,
+                  sessionId: binding.sessionId,
+                  instanceId: resolution.target.id,
+                  sessionName: binding.sessionName,
+                  context: 'browser_tool close',
+                })
               }
 
               bpm.destroyInstance(resolution.target.id)
@@ -4845,17 +4885,18 @@ export class SessionManager implements ISessionManager {
     if (this.browserPaneManager) {
       for (const instance of this.browserPaneManager.listInstances()) {
         if (instance.boundSessionId !== sessionId) continue
-        const attachment = this.browserPaneManager.getLibrettoAttachment(instance.id)
-        if (!attachment?.librettoSession) continue
-
-        const closeResult = await this.librettoSdk.closeSession({
-          cwd: managed.workspace.rootPath,
-          sessionName: attachment.librettoSession,
-        })
-        if (closeResult.exitCode !== 0) {
-          sessionLog.warn(`[browser-pane] libretto close failed during session delete session=${sessionId} instance=${instance.id}: ${closeResult.stderr || closeResult.stdout}`)
-        }
+        const binding = this.librettoBindings.get(instance.id)
+        if (!binding) continue
+        this.librettoBindings.delete(instance.id)
         this.browserPaneManager.clearLibrettoAttachment(instance.id)
+
+        await this.closeLibrettoSession({
+          workspaceRootPath: binding.workspaceRootPath,
+          sessionId: binding.sessionId,
+          instanceId: instance.id,
+          sessionName: binding.sessionName,
+          context: 'session delete',
+        })
       }
 
       this.browserPaneManager.destroyForSession(sessionId)
@@ -6327,8 +6368,12 @@ export class SessionManager implements ISessionManager {
         )
 
         if (this.browserPaneManager && shouldActivateOverlay) {
-          // Ensure first browser action in a turn gets an instance before overlay activation.
-          this.browserPaneManager.getOrCreateForSession(sessionId)
+          // Legacy browser_tool commands expect the first actionable command to create
+          // a window eagerly. In Libretto mode, actionable commands must not create a
+          // hidden unattached pane — they require an existing attachment from "open".
+          if (!FEATURE_FLAGS.librettoBrowserTool) {
+            this.browserPaneManager.getOrCreateForSession(sessionId)
+          }
 
           const resolvedDisplayName = toolDisplayMeta?.displayName
             ?? event.displayName

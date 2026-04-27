@@ -1,7 +1,7 @@
 /**
  * IBrowserPaneManager — interface for browser pane operations used by SessionManager.
  *
- * Covers all 40 methods SessionManager calls on BrowserPaneManager.
+ * Covers the browser pane methods SessionManager calls on BrowserPaneManager.
  * The concrete BrowserPaneManager in apps/electron implements this.
  *
  * Structurally compatible with BrowserOwnershipReleaser (domain layer)
@@ -21,8 +21,6 @@ export interface BrowserInstanceSnapshot {
   isVisible: boolean
   title: string
   currentUrl: string
-  librettoSession?: string | null
-  pageTargetId?: string | null
 }
 
 export interface BrowserLibrettoAttachment {
@@ -149,6 +147,9 @@ export interface IBrowserPaneManager {
 
   /** Register a callback that resolves session IDs to file paths */
   setSessionPathResolver(fn: (sessionId: string) => string | null): void
+
+  /** Register a callback for instance destruction notifications */
+  onInstanceDestroyed(callback: (instanceId: string) => void): void
 
   /** Destroy all browser instances bound to a session */
   destroyForSession(sessionId: string): void

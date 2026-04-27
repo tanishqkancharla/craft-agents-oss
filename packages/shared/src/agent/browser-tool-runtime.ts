@@ -120,7 +120,7 @@ function getLibrettoBrowserToolHelp(): string {
     '',
     'Usage:',
     '  --help',
-    '  open [url] [--foreground|-f]                  open or reuse a Craft browser pane and eagerly attach browser automation',
+    '  open [url] [--foreground|-f]                  open a browser pane and start a session',
     '  windows',
     '  focus [windowId]',
     '  hide [windowId]',
@@ -132,8 +132,9 @@ function getLibrettoBrowserToolHelp(): string {
     '  resume [args...]',
     '',
     'Notes:',
-    '  - Run "open" before snapshot/exec/run/resume. "open" creates the browser automation session eagerly.',
-    '  - If the automation session is missing or stale, run "close" and then "open" to recreate it.',
+    '  - Always run "open" first — other commands require an active session.',
+    '  - If the session is missing or stale, run "close" then "open" to recreate it.',
+    '  - Hidden/released panes stay reserved to the current session until you "close" them.',
     '',
     'Examples:',
     '  open https://example.com',
@@ -149,6 +150,30 @@ export function getBrowserToolHelp(): string {
   return FEATURE_FLAGS.librettoBrowserTool
     ? getLibrettoBrowserToolHelp()
     : getLegacyBrowserToolHelp();
+}
+
+const LIBRETTO_RECREATE_SESSION_HINT =
+  'Browser automation session is missing or stale. Run "browser_tool close" and then "browser_tool open" to recreate it.';
+
+function looksLikeMissingLibrettoSession(details: string): boolean {
+  const normalized = details.toLowerCase();
+  return [
+    'session not found',
+    'no such session',
+    'missing session',
+    'could not find session',
+    'unknown session',
+    'session does not exist',
+    'target page, context or session has been closed',
+  ].some((needle) => normalized.includes(needle));
+}
+
+function formatLibrettoFailure(command: string, result: { stdout: string; stderr: string; exitCode: number }): string {
+  const details = [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join('\n\n');
+  if (details && looksLikeMissingLibrettoSession(details)) {
+    return `${LIBRETTO_RECREATE_SESSION_HINT}\n\n${details}`;
+  }
+  return details || `Browser command ${command} failed with exit code ${result.exitCode}.`;
 }
 
 function formatNodeLine(
@@ -491,7 +516,7 @@ async function executeLibrettoBrowserToolCommand(args: {
     }
 
     if (result.librettoSession) {
-      lines.push('Browser automation attached: yes');
+      lines.push('Session: active');
     }
 
     if (win) {
@@ -517,7 +542,7 @@ async function executeLibrettoBrowserToolCommand(args: {
       `Session windows: ${summarizeWindows(windows)}`,
     ];
     if (target) {
-      lines.push(`Visible: ${target.isVisible}, automationAttached: ${target.librettoSession ? 'yes' : 'no'}`);
+      lines.push(`Visible: ${target.isVisible}, session: ${target.librettoSession ? 'active' : 'none'}`);
     }
 
     return { output: lines.join('\n'), appendReleaseHint: false };
@@ -549,7 +574,7 @@ async function executeLibrettoBrowserToolCommand(args: {
         `  lockState: ${lockState}`,
         `  availableToSession: ${availableToSession}`,
         `  agentControlActive: ${!!w.agentControlActive}`,
-        `  automationAttached: ${w.librettoSession ? 'yes' : 'no'}`,
+        `  session: ${w.librettoSession ? 'active' : 'none'}`,
       );
     }
 
@@ -632,8 +657,7 @@ async function executeLibrettoBrowserToolCommand(args: {
   const result = await runLibretto(parts);
 
   if (result.exitCode !== 0) {
-    const details = [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join('\n\n');
-    throw new Error(details || `Browser command ${cmd} failed with exit code ${result.exitCode}.`);
+    throw new Error(formatLibrettoFailure(cmd, result));
   }
 
   return {

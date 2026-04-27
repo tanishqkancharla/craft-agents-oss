@@ -10,35 +10,35 @@
  * (getOrCreateForSession pattern), so commands don't need instance IDs.
  */
 
-import { tool } from '@anthropic-ai/claude-agent-sdk';
-import { z } from 'zod';
-import { executeBrowserToolCommand } from './browser-tool-runtime.ts';
-import { FEATURE_FLAGS } from '../feature-flags.ts';
+import { tool } from "@anthropic-ai/claude-agent-sdk";
+import { z } from "zod";
+import { executeBrowserToolCommand } from "./browser-tool-runtime.ts";
+import { FEATURE_FLAGS } from "../feature-flags.ts";
 
 // Tool result type - matches MCP CallToolResult content blocks
 type ToolResult = {
   content: Array<
-    | { type: 'text'; text: string }
-    | { type: 'image'; data: string; mimeType: string }
+    | { type: "text"; text: string }
+    | { type: "image"; data: string; mimeType: string }
   >;
   isError?: boolean;
 };
 
 function errorResponse(message: string): ToolResult {
   return {
-    content: [{ type: 'text', text: `Error: ${message}` }],
+    content: [{ type: "text", text: `Error: ${message}` }],
     isError: true,
   };
 }
 
 function successResponse(text: string): ToolResult {
   return {
-    content: [{ type: 'text', text }],
+    content: [{ type: "text", text }],
   };
 }
 
-const LEGACY_BROWSER_RELEASE_HINT = '\n\nWhen you are done using the browser, call browser_tool with command "close" to close the window entirely, or "release" to dismiss the overlay and let the user continue browsing.';
-const LIBRETTO_BROWSER_RELEASE_HINT = '\n\nWhen you are done using the browser, call browser_tool with command "close" to close the window entirely, or "release" to dismiss the overlay and let the user continue browsing.';
+const BROWSER_RELEASE_HINT =
+  '\n\nWhen you are done using the browser, call browser_tool with command "close" to close the window entirely, or "release" to dismiss the overlay and let the user continue browsing.';
 
 // ============================================================================
 // Browser Pane Function Interface
@@ -50,97 +50,118 @@ const LIBRETTO_BROWSER_RELEASE_HINT = '\n\nWhen you are done using the browser, 
  * browser instance via getOrCreateForSession(sessionId).
  */
 export interface BrowserScreenshotArgs {
-  mode?: 'raw' | 'agent'
-  refs?: string[]
-  includeLastAction?: boolean
-  includeMetadata?: boolean
+  mode?: "raw" | "agent";
+  refs?: string[];
+  includeLastAction?: boolean;
+  includeMetadata?: boolean;
   /** Annotate screenshot with @eN labels on all interactive elements */
-  annotate?: boolean
-  format?: 'png' | 'jpeg'
-  jpegQuality?: number
+  annotate?: boolean;
+  format?: "png" | "jpeg";
+  jpegQuality?: number;
 }
 
 export interface BrowserScreenshotResult {
-  imageBuffer: Buffer
-  imageFormat: 'png' | 'jpeg'
-  metadata?: Record<string, unknown>
+  imageBuffer: Buffer;
+  imageFormat: "png" | "jpeg";
+  metadata?: Record<string, unknown>;
 }
 
 export interface BrowserConsoleArgs {
-  level?: 'all' | 'log' | 'info' | 'warn' | 'error'
-  limit?: number
+  level?: "all" | "log" | "info" | "warn" | "error";
+  limit?: number;
 }
 
 export interface BrowserScreenshotRegionArgs {
-  x?: number
-  y?: number
-  width?: number
-  height?: number
-  ref?: string
-  selector?: string
-  padding?: number
-  format?: 'png' | 'jpeg'
-  jpegQuality?: number
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+  ref?: string;
+  selector?: string;
+  padding?: number;
+  format?: "png" | "jpeg";
+  jpegQuality?: number;
 }
 
 export interface BrowserWindowResizeArgs {
-  width: number
-  height: number
+  width: number;
+  height: number;
 }
 
 export interface BrowserNetworkArgs {
-  limit?: number
-  status?: 'all' | 'failed' | '2xx' | '3xx' | '4xx' | '5xx'
-  method?: string
-  resourceType?: string
+  limit?: number;
+  status?: "all" | "failed" | "2xx" | "3xx" | "4xx" | "5xx";
+  method?: string;
+  resourceType?: string;
 }
 
 export interface BrowserWaitArgs {
-  kind: 'selector' | 'text' | 'url' | 'network-idle'
-  value?: string
-  timeoutMs?: number
-  pollMs?: number
-  idleMs?: number
+  kind: "selector" | "text" | "url" | "network-idle";
+  value?: string;
+  timeoutMs?: number;
+  pollMs?: number;
+  idleMs?: number;
 }
 
 export interface BrowserKeyArgs {
-  key: string
-  modifiers?: Array<'shift' | 'control' | 'alt' | 'meta'>
+  key: string;
+  modifiers?: Array<"shift" | "control" | "alt" | "meta">;
 }
 
 export interface BrowserDownloadsArgs {
-  action?: 'list' | 'wait'
-  limit?: number
-  timeoutMs?: number
+  action?: "list" | "wait";
+  limit?: number;
+  timeoutMs?: number;
 }
 
 export interface BrowserLifecycleActionResult {
-  action: 'closed' | 'hidden' | 'released' | 'noop'
-  requestedInstanceId?: string
-  resolvedInstanceId?: string
-  affectedIds: string[]
-  reason?: string
+  action: "closed" | "hidden" | "released" | "noop";
+  requestedInstanceId?: string;
+  resolvedInstanceId?: string;
+  affectedIds: string[];
+  reason?: string;
 }
 
 export interface BrowserOpenPanelResult {
-  instanceId: string
-  url?: string
-  title?: string
-  librettoSession?: string
-  pageTargetId?: string
+  instanceId: string;
+  url?: string;
+  title?: string;
+  librettoSession?: string;
 }
 
 export interface BrowserLibrettoResult {
-  stdout: string
-  stderr: string
-  exitCode: number
+  stdout: string;
+  stderr: string;
+  exitCode: number;
 }
 
 export interface BrowserPaneFns {
-  openPanel: (options?: { background?: boolean; url?: string }) => Promise<BrowserOpenPanelResult>;
+  openPanel: (options?: {
+    background?: boolean;
+    url?: string;
+  }) => Promise<BrowserOpenPanelResult>;
   navigate: (url: string) => Promise<{ url: string; title: string }>;
-  snapshot: () => Promise<{ url: string; title: string; nodes: Array<{ ref: string; role: string; name: string; value?: string; description?: string; focused?: boolean; checked?: boolean; disabled?: boolean }> }>;
-  click: (ref: string, options?: { waitFor?: 'none' | 'navigation' | 'network-idle'; timeoutMs?: number }) => Promise<void>;
+  snapshot: () => Promise<{
+    url: string;
+    title: string;
+    nodes: Array<{
+      ref: string;
+      role: string;
+      name: string;
+      value?: string;
+      description?: string;
+      focused?: boolean;
+      checked?: boolean;
+      disabled?: boolean;
+    }>;
+  }>;
+  click: (
+    ref: string,
+    options?: {
+      waitFor?: "none" | "navigation" | "network-idle";
+      timeoutMs?: number;
+    },
+  ) => Promise<void>;
   clickAt: (x: number, y: number) => Promise<void>;
   drag: (x1: number, y1: number, x2: number, y2: number) => Promise<void>;
   fill: (ref: string, value: string) => Promise<void>;
@@ -148,36 +169,84 @@ export interface BrowserPaneFns {
   select: (ref: string, value: string) => Promise<void>;
   setClipboard: (text: string) => Promise<void>;
   getClipboard: () => Promise<string>;
-  screenshot: (args?: BrowserScreenshotArgs) => Promise<BrowserScreenshotResult>;
-  screenshotRegion: (args: BrowserScreenshotRegionArgs) => Promise<BrowserScreenshotResult>;
-  getConsoleLogs: (args?: BrowserConsoleArgs) => Promise<Array<{ timestamp: number; level: 'log' | 'info' | 'warn' | 'error'; message: string }>>;
-  windowResize: (args: BrowserWindowResizeArgs) => Promise<{ width: number; height: number }>;
-  getNetworkLogs: (args?: BrowserNetworkArgs) => Promise<Array<{ timestamp: number; method: string; url: string; status: number; resourceType: string; ok: boolean }>>;
-  waitFor: (args: BrowserWaitArgs) => Promise<{ ok: true; kind: string; elapsedMs: number; detail: string }>;
+  screenshot: (
+    args?: BrowserScreenshotArgs,
+  ) => Promise<BrowserScreenshotResult>;
+  screenshotRegion: (
+    args: BrowserScreenshotRegionArgs,
+  ) => Promise<BrowserScreenshotResult>;
+  getConsoleLogs: (args?: BrowserConsoleArgs) => Promise<
+    Array<{
+      timestamp: number;
+      level: "log" | "info" | "warn" | "error";
+      message: string;
+    }>
+  >;
+  windowResize: (
+    args: BrowserWindowResizeArgs,
+  ) => Promise<{ width: number; height: number }>;
+  getNetworkLogs: (args?: BrowserNetworkArgs) => Promise<
+    Array<{
+      timestamp: number;
+      method: string;
+      url: string;
+      status: number;
+      resourceType: string;
+      ok: boolean;
+    }>
+  >;
+  waitFor: (
+    args: BrowserWaitArgs,
+  ) => Promise<{ ok: true; kind: string; elapsedMs: number; detail: string }>;
   sendKey: (args: BrowserKeyArgs) => Promise<void>;
-  getDownloads: (args?: BrowserDownloadsArgs) => Promise<Array<{ id: string; timestamp: number; url: string; filename: string; state: string; bytesReceived: number; totalBytes: number; mimeType: string; savePath?: string }>>;
+  getDownloads: (args?: BrowserDownloadsArgs) => Promise<
+    Array<{
+      id: string;
+      timestamp: number;
+      url: string;
+      filename: string;
+      state: string;
+      bytesReceived: number;
+      totalBytes: number;
+      mimeType: string;
+      savePath?: string;
+    }>
+  >;
   upload: (ref: string, filePaths: string[]) => Promise<void>;
-  scroll: (direction: 'up' | 'down' | 'left' | 'right', amount?: number) => Promise<void>;
+  scroll: (
+    direction: "up" | "down" | "left" | "right",
+    amount?: number,
+  ) => Promise<void>;
   goBack: () => Promise<void>;
   goForward: () => Promise<void>;
   evaluate: (expression: string) => Promise<unknown>;
-  focusWindow: (instanceId?: string) => Promise<{ instanceId: string; title: string; url: string }>;
-  releaseControl: (instanceId?: string) => Promise<BrowserLifecycleActionResult>;
+  focusWindow: (
+    instanceId?: string,
+  ) => Promise<{ instanceId: string; title: string; url: string }>;
+  releaseControl: (
+    instanceId?: string,
+  ) => Promise<BrowserLifecycleActionResult>;
   closeWindow: (instanceId?: string) => Promise<BrowserLifecycleActionResult>;
   hideWindow: (instanceId?: string) => Promise<BrowserLifecycleActionResult>;
   runLibretto?: (args: string[]) => Promise<BrowserLibrettoResult>;
-  listWindows: () => Promise<Array<{
-    id: string;
-    title: string;
-    url: string;
-    isVisible: boolean;
-    ownerType: 'session' | 'manual';
-    ownerSessionId: string | null;
-    boundSessionId: string | null;
-    agentControlActive?: boolean;
-    librettoSession?: string | null;
-  }>>;
-  detectChallenge: () => Promise<{ detected: boolean; provider: string; signals: string[] }>;
+  listWindows: () => Promise<
+    Array<{
+      id: string;
+      title: string;
+      url: string;
+      isVisible: boolean;
+      ownerType: "session" | "manual";
+      ownerSessionId: string | null;
+      boundSessionId: string | null;
+      agentControlActive?: boolean;
+      librettoSession?: string | null;
+    }>
+  >;
+  detectChallenge: () => Promise<{
+    detected: boolean;
+    provider: string;
+    signals: string[];
+  }>;
 }
 
 // ============================================================================
@@ -244,23 +313,11 @@ Examples:
 - \`close [windowId]\` — close and destroy the browser window
 - \`hide [windowId]\` — hide the window while preserving state`;
 
-const LIBRETTO_BROWSER_TOOL_DESCRIPTION = `Run browser actions in Craft's built-in browser using the browser_tool command surface.
+const LIBRETTO_BROWSER_TOOL_DESCRIPTION = `Control a built-in browser window. Run \`open\` first to start a session, then use other commands.
 
-Supported commands:
-- \`open [url] [--foreground|-f]\`
-- \`windows\`
-- \`focus [windowId]\`
-- \`hide [windowId]\`
-- \`release [windowId|all]\`
-- \`close [windowId]\`
-- \`snapshot ...\`
-- \`exec ...\`
-- \`run ...\`
-- \`resume ...\`
+Commands: open, snapshot, exec, run, resume, windows, focus, hide, release, close.
 
-Run \`open\` first. It eagerly creates the browser automation session for the pane.
-If automation later becomes detached or stale, use \`close\` and then \`open\` to recreate it.
-
+If the session becomes stale, run \`close\` then \`open\` to recreate it.
 String input is tokenized like a shell command. Array input preserves arguments exactly.
 
 Examples:
@@ -276,12 +333,6 @@ function getBrowserToolDescription(): string {
     : LEGACY_BROWSER_TOOL_DESCRIPTION;
 }
 
-function getBrowserReleaseHint(): string {
-  return FEATURE_FLAGS.librettoBrowserTool
-    ? LIBRETTO_BROWSER_RELEASE_HINT
-    : LEGACY_BROWSER_RELEASE_HINT;
-}
-
 // ============================================================================
 // Tool Factories
 // ============================================================================
@@ -290,7 +341,9 @@ export function createBrowserTools(options: BrowserToolsOptions) {
   function getBrowserFns(): BrowserPaneFns {
     const fns = options.getBrowserPaneFns();
     if (!fns) {
-      throw new Error('Browser window controls are not available. This tool requires the desktop app.');
+      throw new Error(
+        "Browser window controls are not available. This tool requires the desktop app.",
+      );
     }
     return fns;
   }
@@ -298,13 +351,14 @@ export function createBrowserTools(options: BrowserToolsOptions) {
   return [
     // Single CLI-like tool for all browser actions
     tool(
-      'browser_tool',
+      "browser_tool",
       getBrowserToolDescription(),
       {
-        command: z.union([
-          z.string(),
-          z.array(z.string()),
-        ]).describe('Browser command as a string (e.g., "click @e1") or array (e.g., ["evaluate", "var x = 1; x + 2"]). Array mode preserves semicolons and whitespace in arguments.'),
+        command: z
+          .union([z.string(), z.array(z.string())])
+          .describe(
+            'Browser command as a string (e.g., "click @e1") or array (e.g., ["evaluate", "var x = 1; x + 2"]). Array mode preserves semicolons and whitespace in arguments.',
+          ),
       },
       async (args) => {
         try {
@@ -315,21 +369,27 @@ export function createBrowserTools(options: BrowserToolsOptions) {
           });
 
           const text = result.appendReleaseHint
-            ? result.output + getBrowserReleaseHint()
+            ? result.output + BROWSER_RELEASE_HINT
             : result.output;
 
           if (result.image) {
             return {
               content: [
-                { type: 'text' as const, text },
-                { type: 'image' as const, data: result.image.data, mimeType: result.image.mimeType },
+                { type: "text" as const, text },
+                {
+                  type: "image" as const,
+                  data: result.image.data,
+                  mimeType: result.image.mimeType,
+                },
               ],
             };
           }
 
           return successResponse(text);
         } catch (error) {
-          return errorResponse(error instanceof Error ? error.message : String(error));
+          return errorResponse(
+            error instanceof Error ? error.message : String(error),
+          );
         }
       },
     ),
