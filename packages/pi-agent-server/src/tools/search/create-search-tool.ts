@@ -6,7 +6,7 @@
  */
 
 import { Type } from '@sinclair/typebox';
-import type { AgentTool } from '@mariozechner/pi-agent-core';
+import type { AgentTool } from '@earendil-works/pi-agent-core';
 import type { WebSearchProvider, WebSearchResult } from './types.ts';
 import { DDGSearchProvider } from './providers/ddg.ts';
 

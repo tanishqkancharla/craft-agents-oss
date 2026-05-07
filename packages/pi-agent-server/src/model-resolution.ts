@@ -1,4 +1,4 @@
-import type { ModelRegistry as PiModelRegistry } from '@mariozechner/pi-coding-agent';
+import type { ModelRegistry as PiModelRegistry } from '@earendil-works/pi-coding-agent';
 
 // Re-export the PiModel type used by callers
 type PiModel<T = any> = ReturnType<PiModelRegistry['find']>;

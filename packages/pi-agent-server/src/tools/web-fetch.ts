@@ -1,5 +1,5 @@
 import { Type } from '@sinclair/typebox';
-import type { AgentTool, AgentToolResult } from '@mariozechner/pi-agent-core';
+import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core';
 import TurndownService from 'turndown';
 import { parse as parseHtml } from 'node-html-parser';
 import { join } from 'node:path';
