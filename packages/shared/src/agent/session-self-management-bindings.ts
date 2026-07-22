@@ -61,6 +61,17 @@ export function attachSessionSelfManagementBindings(
     enumerable: true,
   });
 
+  // listBackgroundTasks defaults sid → sessionId (like getSessionInfo)
+  Object.defineProperty(context, 'listBackgroundTasks', {
+    get() {
+      const fn = getSessionScopedToolCallbacks(sessionId)?.listBackgroundTasksFn;
+      if (!fn) return undefined;
+      return (sid?: string) => fn(sid ?? sessionId);
+    },
+    configurable: true,
+    enumerable: true,
+  });
+
   Object.defineProperty(context, 'resolveLabels', {
     get() {
       return getSessionScopedToolCallbacks(sessionId)?.resolveLabelsFn;
@@ -80,6 +91,14 @@ export function attachSessionSelfManagementBindings(
   Object.defineProperty(context, 'sendAgentMessage', {
     get() {
       return getSessionScopedToolCallbacks(sessionId)?.sendAgentMessageFn;
+    },
+    configurable: true,
+    enumerable: true,
+  });
+
+  Object.defineProperty(context, 'activateSourceInSession', {
+    get() {
+      return getSessionScopedToolCallbacks(sessionId)?.activateSourceInSessionFn;
     },
     configurable: true,
     enumerable: true,

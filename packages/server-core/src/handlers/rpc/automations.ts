@@ -142,17 +142,23 @@ export function registerAutomationsHandlers(server: RpcServer, deps: HandlerDeps
       const references = parsePromptReferences(action.prompt)
 
       try {
-        const { sessionId } = await deps.sessionManager.executePromptAutomation(
-          payload.workspaceId,
-          workspace.rootPath,
-          action.prompt,
-          payload.labels,
-          payload.permissionMode,
-          references.mentions,
-          action.llmConnection,
-          action.model,
-          payload.automationName,
-        )
+        const { sessionId } = await deps.sessionManager.executePromptAutomation({
+          workspaceId: payload.workspaceId,
+          workspaceRootPath: workspace.rootPath,
+          prompt: action.prompt,
+          labels: payload.labels,
+          permissionMode: payload.permissionMode,
+          mentions: references.mentions,
+          llmConnection: action.llmConnection,
+          model: action.model,
+          thinkingLevel: action.thinkingLevel,
+          automationName: payload.automationName,
+          telegramTopic: payload.telegramTopic,
+          // Test = "did it launch + start producing output", not "did the whole
+          // turn finish". Return once the session is created so a long run doesn't
+          // trip the 30s RPC timeout (craft-agents-oss#943).
+          waitForCompletion: false,
+        })
         results.push({
           type: 'prompt',
           success: true,

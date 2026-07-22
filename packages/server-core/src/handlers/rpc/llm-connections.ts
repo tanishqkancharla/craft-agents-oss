@@ -8,7 +8,7 @@ import {
   validateStoredBackendConnection,
 } from '@craft-agent/shared/agent/backend'
 import { getModelRefreshService } from '@craft-agent/server-core/model-fetchers'
-import { parseTestConnectionError, createBuiltInConnection, validateModelList, piAuthProviderDisplayName, validateSetupTestInput, setupTestRequiresApiKey, isLoopbackBaseUrl } from '@craft-agent/server-core/domain'
+import { parseTestConnectionError, createBuiltInConnection, validateModelList, piAuthProviderDisplayName, validateSetupTestInput, setupTestRequiresApiKey, resolveCustomEndpointSetup } from '@craft-agent/server-core/domain'
 import { getWorkspaceOrThrow, buildBackendHostRuntimeContext } from '@craft-agent/server-core/handlers'
 import { pushTyped, type RpcServer } from '@craft-agent/server-core/transport'
 import type { HandlerDeps } from '../handler-deps'
@@ -107,19 +107,19 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
       const isCustomEndpointCompat = !!customEndpoint
       if (customEndpoint) {
         updates.customEndpoint = customEndpoint
-        // Route custom OpenAI/Anthropic-compatible endpoints through PiAgent.
         updates.providerType = 'pi_compat'
-        // Local loopback endpoints (Ollama, LM Studio) don't need API keys.
-        updates.authType = (isLoopbackBaseUrl(setup.baseUrl ?? undefined) && !setup.credential)
-          ? 'none'
-          : 'api_key_with_endpoint'
-        if (isLoopbackBaseUrl(setup.baseUrl ?? undefined)) {
-          // Local models use the OpenAI protocol but aren't "OpenAI".
-          // Leave piAuthProvider unset → generic icon in the selector.
-          updates.name = 'Local Model'
-        } else {
-          // Remote custom endpoints: keep provider hint for correct icon.
-          updates.piAuthProvider = customEndpoint.api === 'anthropic-messages' ? 'anthropic' : 'openai'
+        const branch = resolveCustomEndpointSetup({
+          baseUrl: setup.baseUrl ?? undefined,
+          credential: setup.credential ?? undefined,
+          customEndpointApi: customEndpoint.api,
+        })
+        updates.authType = branch.authType
+        if (branch.name !== undefined) updates.name = branch.name
+        if (branch.piAuthProvider !== undefined) updates.piAuthProvider = branch.piAuthProvider
+
+        // Brand-name override on first setup only (user-renamed connections aren't clobbered on re-save).
+        if (isNewConnection && !updates.name && setup.baseUrl?.toLowerCase().includes('manifest.build')) {
+          updates.name = 'Manifest'
         }
       } else if (setup.baseUrl !== undefined) {
         // Base URL was explicitly updated without custom protocol config.
@@ -154,6 +154,23 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
       // providerType stays 'pi' (Bedrock routes through Pi SDK).
       if (setup.bedrockAuthMethod) {
         updates.authType = setup.bedrockAuthMethod
+      }
+
+      // Resolved Anthropic OAuth identity (issue #838). Threaded through SETUP so
+      // it persists on both the new-connection path (addLlmConnection) and the
+      // re-auth path (updateLlmConnection) via the shared pendingConnection/updates
+      // flow below. Fail-soft: only stamp when at least one identity block arrived.
+      const oauthIdentity = setup.oauthIdentity
+      if (oauthIdentity?.account || oauthIdentity?.organization) {
+        // Set only fields that are actually present, so `updates` never carries an
+        // explicit `undefined` (matches the guarded-assignment style used above and
+        // keeps the update intent clean). Missing sub-fields are simply not touched;
+        // on re-auth the storage allowlist then preserves any prior value.
+        if (oauthIdentity.account?.uuid) updates.oauthAccountUuid = oauthIdentity.account.uuid
+        if (oauthIdentity.account?.emailAddress) updates.oauthAccountEmail = oauthIdentity.account.emailAddress
+        if (oauthIdentity.organization?.uuid) updates.oauthOrganizationUuid = oauthIdentity.organization.uuid
+        if (oauthIdentity.organization?.name) updates.oauthOrganizationName = oauthIdentity.organization.name
+        updates.oauthProfileVerifiedAt = Date.now()
       }
 
       const effectiveProviderType = updates.providerType ?? connection.providerType
@@ -359,7 +376,7 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
   })
 
   server.handle(RPC_CHANNELS.pi.GET_PROVIDER_MODELS, async (_ctx, provider: string) => {
-    const { getModels } = await import('@mariozechner/pi-ai')
+    const { getModels } = await import('@earendil-works/pi-ai/compat')
     try {
       const models = getModels(provider as Parameters<typeof getModels>[0])
       const sorted = [...models].sort((a, b) => b.cost.output - a.cost.output || b.cost.input - a.cost.input)
@@ -443,6 +460,17 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
         }
       }
       deps.platform.logger?.info(`LLM connection saved: ${connection.slug}`)
+      // Push runtime updates (e.g. supportsImages toggle) to live sessions on
+      // this connection. Detached so SAVE doesn't block on the per-session
+      // 15s `update_runtime_config` timeout when subprocesses are slow or
+      // wedged. SessionManager serializes the refresh with the next send via
+      // its per-session mutex, and the lazy `getOrCreateAgent` refresh remains
+      // the correctness backstop if the detached push fails.
+      sessionManager.refreshConnectionRuntime(connection.slug).catch(error => {
+        deps.platform.logger?.warn(
+          `Detached runtime push failed for ${connection.slug}: ${error instanceof Error ? error.message : error}`,
+        )
+      })
       // Reinitialize auth if the saved connection is the current default
       // (updates env vars and summarization model override)
       const defaultSlug = getDefaultLlmConnection()
@@ -735,7 +763,7 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
     error?: string
   }> => {
     try {
-      const { loginGitHubCopilot } = await import('@mariozechner/pi-ai/oauth')
+      const { loginGitHubCopilot } = await import('@earendil-works/pi-ai/oauth')
       const credentialManager = getCredentialManager()
 
       // Cancel any previous in-flight flow
@@ -748,17 +776,14 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
       // the critical Copilot token exchange that determines the correct
       // API endpoint for the user's subscription tier (individual/business/enterprise).
       const credentials = await loginGitHubCopilot({
-        onAuth: (url, instructions) => {
-          // Extract user code from instructions (format: "Enter code: XXXX-YYYY")
-          const codeMatch = instructions?.match(/:\s*(\S+)/)
-          const userCode = codeMatch?.[1] ?? ''
+        onDeviceCode: ({ userCode, verificationUri }) => {
           deps.platform.logger?.info(`[GitHub OAuth] Device code: ${userCode}`)
           pushTyped(server, RPC_CHANNELS.copilot.DEVICE_CODE, { to: 'client', clientId: ctx.clientId }, {
             userCode,
-            verificationUri: url,
+            verificationUri,
           })
           // Open GitHub device code page on the client's machine
-          server.invokeClient(ctx.clientId, CLIENT_OPEN_EXTERNAL, url).catch(err => {
+          server.invokeClient(ctx.clientId, CLIENT_OPEN_EXTERNAL, verificationUri).catch(err => {
             deps.platform.logger?.warn(`Failed to open browser for GitHub OAuth: ${err}`)
           })
         },

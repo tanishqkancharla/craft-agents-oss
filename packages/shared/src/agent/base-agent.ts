@@ -1,7 +1,7 @@
 /**
  * BaseAgent Abstract Class
  *
- * Shared base class for all AI agent backends (ClaudeAgent, CodexAgent, etc.).
+ * Shared base class for all AI agent backends (ClaudeAgent, PiAgent).
  * Extracts common functionality including:
  * - Model/thinking configuration
  * - Permission mode management (via PermissionManager)
@@ -97,8 +97,11 @@ export interface SpawnSessionRequest {
   model?: string;
   enabledSourceSlugs?: string[];
   permissionMode?: PermissionMode;
+  thinkingLevel?: ThinkingLevel;
   labels?: string[];
   workingDirectory?: string;
+  /** Workspace project id to bind the spawned session to */
+  projectId?: string;
   attachments?: Array<{ path: string; name?: string }>;
 }
 
@@ -197,6 +200,53 @@ export abstract class BaseAgent implements AgentBackend {
   // Additional State (protected for subclass access)
   // ============================================================
   protected temporaryClarifications: string | null = null;
+
+  // ============================================================
+  // Source activation auto-retry (routed through the existing source_activated
+  // + forceAbort + auto_retry pipeline used for tool-call errors).
+  //
+  // When a session-scoped tool (source_test) successfully activates a new source
+  // mid-turn, the Claude SDK's mcpServers is already frozen for the current query
+  // (and Pi's tool registry is only refreshed between turns). The only way to
+  // expose the new tools is to end the current turn and auto-resend the user's
+  // original message with a "[{slug} activated]" suffix — same as what happens
+  // when a model directly calls an unknown tool on an inactive source.
+  //
+  // activateSourceInSessionFn in SessionManager sets this; the per-backend event
+  // loop consumes it after yielding the source_test tool_result.
+  // ============================================================
+  protected _pendingSourceActivationRestart: { sourceSlug: string; userMessage: string } | null = null;
+  protected _currentTurnUserMessage: string | null = null;
+
+  setPendingSourceActivationRestart(pending: { sourceSlug: string; userMessage: string }): void {
+    // First-writer-wins under parallel `mcp__session__source_test` calls. The
+    // overwrite race itself is harmless (each activation runs independently and
+    // succeeds), but the surviving slug is what the renderer displays in the
+    // "[{slug} activated]" suffix on the auto-resend. Keeping the first writer
+    // gives a stable user-facing label without forcing all source_tests to
+    // serialize. See #790.
+    if (this._pendingSourceActivationRestart) {
+      this.debug(
+        `source-activation restart already pending (${this._pendingSourceActivationRestart.sourceSlug}); ignoring overlapping activation of "${pending.sourceSlug}"`,
+      );
+      return;
+    }
+    this._pendingSourceActivationRestart = pending;
+  }
+
+  consumePendingSourceActivationRestart(): { sourceSlug: string; userMessage: string } | null {
+    const pending = this._pendingSourceActivationRestart;
+    this._pendingSourceActivationRestart = null;
+    return pending;
+  }
+
+  getCurrentTurnUserMessage(): string | null {
+    return this._currentTurnUserMessage;
+  }
+
+  protected setCurrentTurnUserMessage(message: string | null): void {
+    this._currentTurnUserMessage = message;
+  }
 
   // ============================================================
   // Callbacks (public for facade wiring)
@@ -366,9 +416,8 @@ export abstract class BaseAgent implements AgentBackend {
    * has its own process memory, so when it calls getSessionScopedToolCallbacks(),
    * the callback registry is empty — it was populated in THIS process, not the subprocess.
    *
-   * Instead, each backend (CodexAgent, CopilotAgent) detects session MCP tool
-   * completions from its own event stream (different formats per SDK) and calls
-   * THIS shared method to fire the appropriate callback.
+   * Instead, PiAgent detects session MCP tool completions from its own event
+   * stream and calls THIS shared method to fire the appropriate callback.
    *
    * ClaudeAgent doesn't need this — its session-scoped tools run in-process
    * via Claude Agent SDK, so the callback registry works directly.
@@ -666,7 +715,7 @@ export abstract class BaseAgent implements AgentBackend {
    * Get mini agent configuration for provider-specific application.
    * Returns centralized config that each backend interprets appropriately:
    * - ClaudeAgent: Uses tools array, mcpServers filter, maxThinkingTokens: 0
-   * - CodexAgent: Uses baseInstructions, codex-mini model, effort: 'low'
+   * - PiAgent: Applies tool filter + minimizeThinking via runtime config
    */
   getMiniAgentConfig(): MiniAgentConfig {
     const enabled = this.isMiniAgent();
@@ -994,7 +1043,15 @@ ${formattedMessages}
     const messageParts = [branchSeedContext, transferredSessionContext, directive, cleanMessage].filter(Boolean);
     const effectiveMessage = messageParts.join('\n\n');
 
-    yield* this.chatImpl(effectiveMessage, attachments, options);
+    // Capture the raw user message for source-activation auto-retry. `cleanMessage`
+    // has skill paths stripped but otherwise matches what the user typed — exactly
+    // what we want to resend when an activation forces a turn restart.
+    this.setCurrentTurnUserMessage(cleanMessage);
+    try {
+      yield* this.chatImpl(effectiveMessage, attachments, options);
+    } finally {
+      this.setCurrentTurnUserMessage(null);
+    }
   }
 
   // ============================================================
@@ -1073,8 +1130,7 @@ ${formattedMessages}
    *
    * Each backend implements this using its own SDK/session mechanism:
    * - ClaudeAgent: SDK query() with OAuth
-   * - CodexAgent: Ephemeral thread on app-server
-   * - CopilotAgent: Ephemeral CopilotSession
+   * - PiAgent: One-shot completion via Pi SDK in the subprocess
    *
    * @param request - The query request (prompt, model, systemPrompt, etc.)
    * @returns The model's response text and optional token usage
@@ -1131,10 +1187,12 @@ ${formattedMessages}
       model: input.model as string | undefined,
       enabledSourceSlugs: input.enabledSourceSlugs as string[] | undefined,
       permissionMode: input.permissionMode as SpawnSessionRequest['permissionMode'],
+      thinkingLevel: input.thinkingLevel as SpawnSessionRequest['thinkingLevel'],
       labels: input.labels as string[] | undefined,
       workingDirectory: typeof input.workingDirectory === 'string' && input.workingDirectory
         ? expandPath(input.workingDirectory)
         : undefined,
+      projectId: input.projectId as string | undefined,
       attachments: input.attachments as SpawnSessionRequest['attachments'],
     };
 

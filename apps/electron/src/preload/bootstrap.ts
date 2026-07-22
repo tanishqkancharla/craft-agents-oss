@@ -17,7 +17,7 @@
  */
 
 import '@sentry/electron/preload'
-import { contextBridge, ipcRenderer, shell } from 'electron'
+import { contextBridge, ipcRenderer, shell, webUtils } from 'electron'
 import { WsRpcClient, type TransportConnectionState } from '../transport/client'
 import { RoutedClient } from '../transport/routed-client'
 import { buildClientApi } from '../transport/build-api'
@@ -30,9 +30,10 @@ import {
   CLIENT_SHOW_IN_FOLDER,
   CLIENT_CONFIRM_DIALOG,
   CLIENT_OPEN_FILE_DIALOG,
+  CLIENT_BROWSER_INVOKE,
   LOCAL_CLIENT_CAPABILITIES,
 } from '@craft-agent/server-core/transport'
-import type { ConfirmDialogSpec, FileDialogSpec } from '@craft-agent/server-core/transport'
+import type { ConfirmDialogSpec, FileDialogSpec, BrowserCapabilityRequest } from '@craft-agent/server-core/transport'
 import type { RpcClient } from '@craft-agent/server-core/transport'
 import type { RemoteServerConfig } from '@craft-agent/core/types'
 import type { ElectronAPI } from '../shared/types'
@@ -174,6 +175,14 @@ client.handleCapability(CLIENT_CONFIRM_DIALOG, async (spec: ConfirmDialogSpec) =
 
 client.handleCapability(CLIENT_OPEN_FILE_DIALOG, async (spec: FileDialogSpec) => {
   return await ipcRenderer.invoke('__dialog:showOpenDialog', spec)
+})
+
+// Browser pane invocation. The remote server packages an IBrowserPaneManager
+// method call as a BrowserCapabilityRequest; we dispatch it to the local
+// `BrowserPaneManager` via the `__browser:invoke` IPC channel registered in
+// `apps/electron/src/main/browser-pane-manager.ts:registerCapabilityIpc()`.
+client.handleCapability(CLIENT_BROWSER_INVOKE, async (req: BrowserCapabilityRequest) => {
+  return await ipcRenderer.invoke('__browser:invoke', req)
 })
 
 // ---------------------------------------------------------------------------
@@ -423,5 +432,16 @@ client.onConnectionStateChanged((state) => {
 
 // i18n: sync language changes to main process (for native menus/dialogs)
 ;(api as ElectronAPI).changeLanguage = (lang: string) => ipcRenderer.invoke('i18n:changeLanguage', lang)
+
+// webUtils.getPathForFile: returns the absolute OS path of a File object obtained
+// from <input type="file"> or OS drag-drop. Returns null for Files fabricated from
+// Blobs (clipboard paste, web-drag) — those are content-only, no filesystem path.
+;(api as ElectronAPI).getFilePath = (file: File) => {
+  try {
+    return webUtils.getPathForFile(file) || null
+  } catch {
+    return null
+  }
+}
 
 contextBridge.exposeInMainWorld('electronAPI', api)

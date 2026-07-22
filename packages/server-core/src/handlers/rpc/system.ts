@@ -4,6 +4,7 @@ import { homedir } from 'os'
 import { execSync } from 'child_process'
 import { RPC_CHANNELS } from '@craft-agent/shared/protocol'
 import { getWorkspaceByNameOrId, getGitBashPath, setGitBashPath, clearGitBashPath } from '@craft-agent/shared/config'
+import { classifyExternalUrl, formatBlockedUrlError } from '@craft-agent/shared/utils/url-safety'
 import { isUsableGitBashPath, validateGitBashPath } from '@craft-agent/server-core/services'
 import { validateFilePath, getWorkspaceAllowedDirs } from '@craft-agent/server-core/handlers'
 import type { RpcServer } from '@craft-agent/server-core/transport'
@@ -280,9 +281,14 @@ export function registerSystemCoreHandlers(server: RpcServer, deps: HandlerDeps)
   server.handle(RPC_CHANNELS.shell.OPEN_URL, async (ctx, url: string) => {
     deps.platform.logger.info('[OPEN_URL] Received request:', url)
     try {
+      const classification = classifyExternalUrl(url)
+      if (classification.kind === 'dangerous') {
+        throw new Error(formatBlockedUrlError(classification))
+      }
+
       const parsed = new URL(url)
 
-      if (parsed.protocol === 'craftagents:') {
+      if (classification.kind === 'internal-deeplink') {
         const deepLink = parseInternalCraftAgentsDeepLink(parsed)
 
         if (deepLink?.handledNoop) {
@@ -309,10 +315,6 @@ export function registerSystemCoreHandlers(server: RpcServer, deps: HandlerDeps)
           throw new Error(`Cannot open URL on client: ${deepLinkResult.error}`)
         }
         return
-      }
-
-      if (!['http:', 'https:', 'mailto:', 'craftdocs:'].includes(parsed.protocol)) {
-        throw new Error('Only http, https, mailto, craftdocs, craftagents URLs are allowed')
       }
 
       const result = await requestClientOpenExternal(server, ctx.clientId, url)
